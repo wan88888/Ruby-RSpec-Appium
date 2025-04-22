@@ -13,8 +13,17 @@ class DriverFactory
       raise "Unsupported platform: #{platform}"
     end
     
-    # 设置noReset为false，启用全新会话
-    capabilities[:caps]['appium:noReset'] = false
+    # iOS平台保留应用安装，提高测试效率
+    if platform.to_sym == :ios
+      # 设置noReset为true，避免重装应用
+      capabilities[:caps]['appium:noReset'] = true
+      # 设置fullReset为false，避免卸载应用
+      capabilities[:caps]['appium:fullReset'] = false
+    else
+      # Android默认设置
+      capabilities[:caps]['appium:noReset'] = false
+    end
+    
     # 设置自动接受警告
     capabilities[:caps]['appium:autoAcceptAlerts'] = true if platform.to_sym == :ios
     # 设置命令超时时间

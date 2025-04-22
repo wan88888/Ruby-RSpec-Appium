@@ -12,7 +12,8 @@
 /tmp/
 
 # Environment
-.env
+# 移除.env相关的排除，使其可以提交到远程仓库
+# .env
 .env.local
 .env.development.local
 .env.test.local

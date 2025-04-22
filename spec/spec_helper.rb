@@ -69,69 +69,110 @@ RSpec.configure do |config|
       app_id = if @platform == 'android'
                  ENV['ANDROID_APP_PACKAGE']
                else
-                 ENV['IOS_APP_PATH']
+                 # 对于iOS，使用固定的Bundle ID
+                 "com.saucelabs.SwagLabsMobileApp"
                end
       
-      $logger.info("Restarting app: #{app_id}")
+      $logger.info("Preparing app for test: #{app_id}")
       
-      # 为iOS平台增加更多重试和等待
-      max_restart_attempts = @platform == 'ios' ? 3 : 1
-      restart_attempt = 0
-      restart_success = false
-      
-      while restart_attempt < max_restart_attempts && !restart_success
-        restart_attempt += 1
-        
-        if restart_attempt > 1
-          $logger.info("Retry attempt #{restart_attempt} to restart app")
-          sleep 3 # 在重试前增加额外等待
-        end
-        
-        # 使用新方法重启应用
-        restart_success = DriverFactory.restart_app(@driver, app_id)
-        
-        # 如果重启失败且是iOS，尝试额外的恢复步骤
-        if !restart_success && @platform == 'ios'
-          $logger.warn("iOS app restart attempt #{restart_attempt} failed, trying additional recovery")
+      # 为iOS平台增加特殊处理
+      if @platform == 'ios'
+        # iOS特殊处理：不进行完全重启，而是在测试前尝试回到初始状态
+        begin
+          # 确保应用处于前台运行状态
+          app_state = @driver.app_state(app_id) rescue 0
           
-          begin
-            # 检查应用是否可接受警告框
-            begin
-              @driver.switch_to.alert.accept
-              $logger.info("Accepted alert dialog")
-            rescue => alert_err
-              # 忽略没有警告框的错误
-            end
-            
-            # 短暂等待以查看是否已经恢复
+          if app_state != 4 # 如果应用不在前台运行
+            # 先尝试激活应用
+            $logger.info("Activating iOS app (current state: #{app_state})")
+            @driver.activate_app(app_id) rescue nil
             sleep 2
-            
-            # 检查页面状态
-            begin
-              @driver.get_page_source
-              $logger.info("App appears responsive after recovery attempt")
-              restart_success = true
-            rescue => source_err
-              $logger.warn("App still not responsive: #{source_err.message}")
-            end
-          rescue => recovery_err
-            $logger.warn("Additional recovery failed: #{recovery_err.message}")
           end
+          
+          # 尝试通过UI交互回到初始状态（如点击返回按钮或菜单项）
+          begin
+            # 检查是否在产品页面，如果是，通过菜单退出登录
+            if @products_page && @products_page.is_products_page_displayed?(3)
+              $logger.info("Found products page, attempting to log out")
+              @products_page.open_hamburger_menu rescue nil
+              sleep 1
+              
+              # 尝试查找并点击注销按钮
+              logout_locators = [
+                {accessibility_id: 'test-LOGOUT'},
+                {xpath: '//XCUIElementTypeStaticText[@name="LOGOUT"]'},
+                {xpath: "//XCUIElementTypeOther[contains(@name, 'LOGOUT')]"}
+              ]
+              
+              logout_locators.each do |locator|
+                begin
+                  @driver.find_element(locator).click
+                  $logger.info("Clicked logout button")
+                  break
+                rescue => e
+                  # 继续尝试下一个定位器
+                end
+              end
+              
+              # 给页面跳转一些时间
+              sleep 2
+            end
+          rescue => ui_err
+            $logger.warn("UI interaction error: #{ui_err.message}")
+          end
+          
+          # 检查登录页面是否显示
+          login_page_displayed = @login_page.is_login_page_displayed?(5) rescue false
+          
+          # 如果UI交互无法回到登录页，则强制重启应用
+          unless login_page_displayed
+            $logger.info("Login page not visible, performing app restart")
+            # 使用标准的应用重启方法
+            restart_success = DriverFactory.restart_app(@driver, app_id)
+            
+            if !restart_success
+              $logger.warn("Standard restart failed, attempting direct restart")
+              begin
+                @driver.terminate_app(app_id) rescue nil
+                sleep 1
+                @driver.activate_app(app_id) rescue nil
+                sleep 3
+              rescue => restart_err
+                $logger.error("Direct restart failed: #{restart_err.message}")
+              end
+            end
+          else
+            $logger.info("App is already on login page, no restart needed")
+          end
+        rescue => e
+          $logger.error("iOS app preparation error: #{e.message}")
         end
-      end
-      
-      # 如果所有重启尝试都失败，重新创建driver
-      if !restart_success
-        $logger.warn("App restart failed after #{restart_attempt} attempts, recreating driver")
-        DriverFactory.quit_driver(@driver)
-        @driver = DriverFactory.create_driver(@platform)
-        @login_page = LoginPage.new(@driver)
-        @products_page = ProductsPage.new(@driver)
+      else
+        # Android使用标准重启方法
+        # 为Android平台增加更多重试和等待
+        max_restart_attempts = 2
+        restart_attempt = 0
+        restart_success = false
         
-        # 对iOS额外等待以确保应用启动完成
-        if @platform == 'ios'
-          $logger.info("Waiting additional time for iOS app to stabilize")
-          sleep 5
+        while restart_attempt < max_restart_attempts && !restart_success
+          restart_attempt += 1
+          
+          if restart_attempt > 1
+            $logger.info("Retry attempt #{restart_attempt} to restart Android app")
+            sleep 2
+          end
+          
+          # 使用标准方法重启应用
+          restart_success = DriverFactory.restart_app(@driver, app_id)
+        end
+        
+        # 如果重启失败，重新创建driver
+        if !restart_success
+          $logger.warn("Android app restart failed, recreating driver")
+          DriverFactory.quit_driver(@driver)
+          @driver = DriverFactory.create_driver(@platform)
+          @login_page = LoginPage.new(@driver)
+          @products_page = ProductsPage.new(@driver)
         end
       end
     end
@@ -143,8 +184,8 @@ RSpec.configure do |config|
       app_id = if @platform == 'android'
                  ENV['ANDROID_APP_PACKAGE']
                else
-                 # 对于iOS，尝试使用更可靠的方式获取bundle ID
-                 ENV['IOS_BUNDLE_ID'] || "com.saucelabs.SwagLabsMobileApp" || ENV['IOS_APP_PATH']
+                 # 对于iOS，使用固定的Bundle ID
+                 "com.saucelabs.SwagLabsMobileApp"
                end
       
       $logger.info("Closing app after test: #{app_id}")
@@ -155,32 +196,35 @@ RSpec.configure do |config|
           @driver.terminate_app(app_id)
           $logger.info("Android app closed successfully")
         else
-          # iOS平台使用增强的终止方法
-          if DriverFactory.terminate_app_safely(@driver, app_id)
-            $logger.info("iOS app closed successfully")
-          else
-            $logger.warn("Could not terminate iOS app with standard method")
-            # 尝试使用Appium reset作为后备方案
+          # iOS平台使用直接终止方法，完全避免使用reset
+          begin
+            # 首先尝试直接终止应用
             begin
-              @driver.reset
-              $logger.info("Used driver reset as fallback for iOS")
-            rescue => reset_err
-              $logger.warn("Reset fallback also failed: #{reset_err.message}")
+              result = @driver.terminate_app(app_id)
+              $logger.info("iOS app terminated directly with result: #{result}")
+            rescue => term_err
+              $logger.warn("Standard termination failed: #{term_err.message}")
             end
+            
+            # 额外检查应用是否仍在运行
+            begin
+              app_state = @driver.app_state(app_id)
+              if app_state > 1 # 如果应用仍在运行
+                # 尝试使用executeScript关闭应用
+                @driver.execute_script('mobile: terminateApp', { bundleId: app_id })
+                $logger.info("Used executeScript to terminate iOS app")
+              else
+                $logger.info("iOS app is already closed (state: #{app_state})")
+              end
+            rescue => state_err
+              $logger.warn("App state check failed: #{state_err.message}")
+            end
+          rescue => e
+            $logger.error("All iOS app termination methods failed: #{e.message}")
           end
         end
       rescue => e
         $logger.error("Failed to close app: #{e.message}")
-        
-        # 对于iOS，即使出现错误也不要急于放弃
-        if @platform == 'ios'
-          $logger.info("Attempting alternative iOS app termination")
-          begin
-            DriverFactory.close_all_apps(@driver)
-          rescue => alt_err
-            $logger.error("Alternative termination also failed: #{alt_err.message}")
-          end
-        end
       end
     end
   end
